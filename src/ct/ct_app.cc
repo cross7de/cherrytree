@@ -489,6 +489,17 @@ int CtApp::on_command_line(const Glib::RefPtr<Gio::ApplicationCommandLine>& comm
                 }
                 else {
                     win->update_window_save_not_needed();
+                    // Project operations can modify multiple loaded text buffers.
+                    // They were all saved, so clear their stale modified flags.
+                    auto& tree_store = win->get_tree_store();
+                    tree_store.get_store()->foreach([&tree_store](
+                        const Gtk::TreePath&, const Gtk::TreeModel::iterator& iter) -> bool {
+                        CtTreeIter node = tree_store.to_ct_tree_iter(iter);
+                        if (node.get_node_buffer_already_loaded()) {
+                            node.get_node_text_buffer()->set_modified(false);
+                        }
+                        return false;
+                    });
                     win->get_state_machine().update_state();
                     if (action == "create") output = std::to_string(new_id) + "\n";
                     else if (action == "delete") output = "Deleted " + pnr + "\n";
