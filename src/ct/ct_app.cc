@@ -29,6 +29,10 @@
 #endif
 #include "ct_pref_dlg.h"
 #include "ct_storage_control.h"
+#if defined(G_OS_UNIX)
+#include <gio/gunixinputstream.h>
+#include <unistd.h>
+#endif
 #include "config.h"
 #include "ct_logging.h"
 #include <iostream>
@@ -340,6 +344,166 @@ void CtApp::on_activate()
 int CtApp::on_command_line(const Glib::RefPtr<Gio::ApplicationCommandLine>& command_line)
 {
     const auto options = command_line->get_options_dict();
+    if (options->contains("local-project-action")) {
+        Glib::ustring action, title, pnr, year_text;
+        options->lookup_value("local-project-action", action);
+        options->lookup_value("local-project-name", title);
+        options->lookup_value("local-project-pnr", pnr);
+        options->lookup_value("local-project-years", year_text);
+        const bool all = options->contains("local-project-all");
+        const bool confirmed = options->contains("local-project-yes");
+        const bool recursive = options->contains("local-project-recursive");
+        int years{1};
+        if (not year_text.empty()) {
+            try { years = std::stoi(year_text.raw()); }
+            catch (const std::exception&) {
+                command_line->printerr("Invalid project year count\n");
+                return 2;
+            }
+        }
+        if (action != "create" and action != "list" and action != "rename" and action != "delete") {
+            command_line->printerr("Unknown project action\n");
+            return 2;
+        }
+        int argc{0};
+        char** argv = command_line->get_arguments(argc);
+        Glib::RefPtr<Gio::File> file;
+        if (argc == 2) file = command_line->create_file_for_arg(argv[1]);
+        g_strfreev(argv);
+        if (argc > 2) {
+            command_line->printerr("Specify at most one .ctb document\n");
+            return 2;
+        }
+
+        _on_startup();
+        CtMainWin* win{nullptr};
+        bool temporary{false};
+        if (file) {
+            std::string path;
+            try {
+                path = fs::canonical(file->get_path()).string();
+                if (not fs::is_regular_file(path) or fs::path(path).extension() != ".ctb" or
+                    fs::get_doc_type_from_file_ext(path) != CtDocType::SQLite) {
+                    command_line->printerr("Project commands require an unencrypted .ctb document\n");
+                    return 2;
+                }
+            }
+            catch (const std::exception&) {
+                command_line->printerr("Document not found\n");
+                return 1;
+            }
+            for (Gtk::Window* window : get_windows()) {
+                if (auto candidate = dynamic_cast<CtMainWin*>(window)) {
+                    if (candidate->get_ct_storage() and
+                        candidate->get_ct_storage()->get_file_path() == path) {
+                        win = candidate;
+                        break;
+                    }
+                }
+            }
+            if (not win) {
+                win = _create_window(true/*no_gui*/);
+                temporary = true;
+                if (not win->file_open(path, "", "", "")) {
+                    win->force_exit() = true;
+                    remove_window(*win);
+                    command_line->printerr("Could not open project document\n");
+                    return 1;
+                }
+            }
+        }
+        else {
+            int matches{0};
+            for (Gtk::Window* window : get_windows()) {
+                if (auto candidate = dynamic_cast<CtMainWin*>(window)) {
+                    if (candidate->get_ct_storage() and
+                        candidate->get_ct_storage()->get_file_path().extension() == ".ctb") {
+                        ++matches;
+                        win = candidate;
+                    }
+                }
+            }
+            if (matches != 1) {
+                command_line->printerr("Open exactly one .ctb document, or specify its path before 'project'\n");
+                return 2;
+            }
+        }
+        // For an explicitly opened document, close only the temporary headless window.
+        int status{1};
+        Glib::ustring error, output;
+        gint64 new_id{0};
+        if ((action == "create" or action == "rename" or action == "delete") and win->get_file_save_needed()) {
+            error = "Document has unsaved changes; save it first";
+        }
+        else {
+            bool ok{false};
+            if (action == "list") ok = win->get_ct_actions()->project_cli_list(years, all, output, error);
+            else if (action == "create") ok = win->get_ct_actions()->project_cli_create(title, new_id, error);
+            else if (action == "rename") ok = win->get_ct_actions()->project_cli_rename(pnr, title, error);
+            else {
+                Glib::ustring display_name;
+                // Validate the project and all constraints BEFORE prompting.
+                ok = win->get_ct_actions()->project_cli_delete(pnr, recursive, false,
+                                                                 display_name, error);
+                if (ok and not confirmed) {
+                    bool accepted{false};
+                    auto input = command_line->get_stdin();
+#if defined(G_OS_UNIX)
+                    if (input and G_IS_UNIX_INPUT_STREAM(input->gobj()) and
+                        isatty(g_unix_input_stream_get_fd(G_UNIX_INPUT_STREAM(input->gobj())))) {
+                        Glib::ustring prompt = "Projekt ";
+                        prompt += display_name;
+                        if (recursive) prompt += " einschließlich aller Unterknoten";
+                        prompt += " wirklich löschen? [j/N] ";
+                        command_line->print(prompt);
+                        std::string answer;
+                        for (int i = 0; i < 16; ++i) {
+                            char ch{0};
+                            GError* read_error{nullptr};
+                            const gssize count = g_input_stream_read(input->gobj(), &ch, 1,
+                                                                      nullptr, &read_error);
+                            if (read_error) { g_error_free(read_error); break; }
+                            if (count != 1 or ch == '\n' or ch == '\r') break;
+                            answer += ch;
+                        }
+                        accepted = answer == "j" or answer == "ja" or
+                                   answer == "J" or answer == "JA";
+                    }
+                    else {
+                        error = "No interactive terminal available; use --yes to delete without confirmation";
+                    }
+#else
+                    (void)input;
+                    error = "Interactive confirmation is unavailable on this platform; use --yes";
+#endif
+                    if (not accepted and error.empty()) error = "Deletion cancelled";
+                    ok = accepted;
+                }
+                if (ok) ok = win->get_ct_actions()->project_cli_delete(pnr, recursive, true,
+                                                                         display_name, error);
+            }
+            if (ok) {
+                if (action == "list") status = 0;
+                else if (not win->get_ct_storage()->save(false/*need_vacuum*/, error)) {
+                    error += " (an open GUI may contain unsaved partial changes)";
+                }
+                else {
+                    win->update_window_save_not_needed();
+                    win->get_state_machine().update_state();
+                    if (action == "create") output = std::to_string(new_id) + "\n";
+                    else if (action == "delete") output = "Deleted " + pnr + "\n";
+                    status = 0;
+                }
+            }
+        }
+        if (temporary) {
+            win->force_exit() = true;
+            remove_window(*win);
+        }
+        if (status == 0) command_line->print(output);
+        else command_line->printerr(Glib::ustring{"CherryTree project: "} + error + "\n");
+        return status;
+    }
     const bool duplicate = options->contains("duplicate");
     const bool has_node_id = options->contains("node-id");
     if (duplicate and not has_node_id) {
@@ -832,6 +996,13 @@ void CtApp::_add_main_option_entries()
     add_main_option_entry(Gio::Application::OptionType::STRING,   "node-id",            0,   _("Numeric node ID to focus or duplicate"));
     add_main_option_entry(Gio::Application::OptionType::BOOL,     "duplicate",          0,   _("Duplicate the node selected by --node-id"));
     add_main_option_entry(Gio::Application::OptionType::STRING,   "name",               0,   _("Name of duplicated node (optional)"));
+    add_main_option_entry(Gio::Application::OptionType::STRING,   "local-project-action", 0, "Local project action");
+    add_main_option_entry(Gio::Application::OptionType::STRING,   "local-project-name",   0, "Local project name");
+    add_main_option_entry(Gio::Application::OptionType::STRING,   "local-project-pnr",    0, "Local project number");
+    add_main_option_entry(Gio::Application::OptionType::STRING,   "local-project-years",  0, "Local project year count");
+    add_main_option_entry(Gio::Application::OptionType::BOOL,     "local-project-all",    0, "All local projects");
+    add_main_option_entry(Gio::Application::OptionType::BOOL,     "local-project-yes",    0, "Skip local project deletion confirmation");
+    add_main_option_entry(Gio::Application::OptionType::BOOL,     "local-project-recursive", 0, "Delete child nodes too");
     add_main_option_entry(Gio::Application::OptionType::STRING,   "node",               'n', _("Node name to focus"));
     add_main_option_entry(Gio::Application::OptionType::STRING,   "anchor",             'a', _("Anchor name to scroll to in node"));
     add_main_option_entry(Gio::Application::OptionType::FILENAME, "export_to_html_dir", 'x', _("Export to HTML at specified directory path"));
@@ -847,6 +1018,13 @@ void CtApp::_add_main_option_entries()
     add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "node-id",            0,   _("Numeric node ID to focus or duplicate"));
     add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "duplicate",          0,   _("Duplicate the node selected by --node-id"));
     add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "name",               0,   _("Name of duplicated node (optional)"));
+    add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "local-project-action", 0, "Local project action");
+    add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "local-project-name",   0, "Local project name");
+    add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "local-project-pnr",    0, "Local project number");
+    add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "local-project-years",  0, "Local project year count");
+    add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "local-project-all",    0, "All local projects");
+    add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "local-project-yes",    0, "Skip local project deletion confirmation");
+    add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "local-project-recursive", 0, "Delete child nodes too");
     add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "node",               'n', _("Node name to focus"));
     add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "anchor",             'a', _("Anchor name to scroll to in node"));
     add_main_option_entry(Gio::Application::OPTION_TYPE_FILENAME, "export_to_html_dir", 'x', _("Export to HTML at specified directory path"));

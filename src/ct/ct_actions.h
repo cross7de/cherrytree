@@ -158,6 +158,11 @@ public:
         _node_add(CtDuplicateShared::None, false/*add_as_child*/);
     }
     gint64 node_duplicate_cli(gint64 source_node_id, const Glib::ustring* pNewName);
+    bool project_cli_list(int years, bool all, Glib::ustring& output, Glib::ustring& error);
+    bool project_cli_create(const Glib::ustring& title, gint64& new_id, Glib::ustring& error);
+    bool project_cli_rename(const Glib::ustring& pnr, const Glib::ustring& title, Glib::ustring& error);
+    bool project_cli_delete(const Glib::ustring& pnr, bool recursive, bool perform,
+                            Glib::ustring& display_name, Glib::ustring& error);
     void node_duplicate() {
         if (not _is_there_selected_node_or_error()) return;
         CtTreeIter treeIter = _pCtMainWin->curr_tree_iter();

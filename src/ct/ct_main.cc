@@ -22,7 +22,9 @@
  */
 
 #include "ct_app.h"
+#include "ct_project_cli.h"
 #include "ct_misc_utils.h"
+#include <iostream>
 #include "config.h"
 #include "ct_logging.h"
 #include <spdlog/sinks/stdout_color_sinks.h>
@@ -103,7 +105,21 @@ int main(int argc, char *argv[])
     textdomain(GETTEXT_PACKAGE);
 #endif /* HAVE_NLS */
 
-    // Keep stdout machine-readable for CLI node duplication.
+    // Subcommands are parsed locally before GLib's global option parser.
+    // They are forwarded via ordinary GApplication options to the running instance.
+    auto project_result = CtProjectCli::parse(argc, argv, std::cout, std::cerr);
+    if (project_result.stop) return project_result.status;
+    const bool project_command = project_result.recognized;
+    std::vector<std::string> project_args;
+    std::vector<char*> project_argv;
+    if (project_command) {
+        project_args = project_result.argv;
+        for (auto& arg : project_args) project_argv.push_back(&arg[0]);
+        argc = static_cast<int>(project_argv.size());
+        argv = project_argv.data();
+    }
+
+    // Keep stdout machine-readable for CLI commands.
     bool cli_node_command{false};
     for (int i = 1; i < argc; ++i) {
         if (0 == strcmp("--node-id", argv[i]) or
@@ -117,7 +133,7 @@ int main(int argc, char *argv[])
     }
     // output logs into console and a log file
     std::vector<spdlog::sink_ptr> sinks;
-    if (cli_node_command) sinks.push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
+    if (cli_node_command or project_command) sinks.push_back(std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
     else sinks.push_back(std::make_shared<spdlog::sinks::stdout_color_sink_mt>());
 
     std::optional<fs::path> optLogdir = fs::get_cherrytree_logdir();
