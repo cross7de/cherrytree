@@ -24,7 +24,7 @@ inline std::string usage()
     return "Usage:\n"
            "  ct [FILE.ctb] project create NAME\n"
            "  ct [FILE.ctb] project list [-N | --years N | -a | --all]\n"
-           "  ct [FILE.ctb] project rename PNR NAME\n"
+           "  ct [FILE.ctb] project rename PNR NAME [--all-occurrences]\n"
            "  ct [FILE.ctb] project delete PNR [-r|--recursive] [-y|--yes]\n"
            "  ct project help [create|list|rename|delete]\n";
 }
@@ -34,7 +34,8 @@ inline std::string help(const std::string& action = "")
     if (action == "create") return usage() + "\ncreate: Create a project from the current placeholder.\n";
     if (action == "list") return usage() + "\nlist: Show the latest project year (default), last N years (-N or --years N), or all (--all).\n"
                                            "-N counts calendar years including the newest project year. -a is an alias for --all.\n";
-    if (action == "rename") return usage() + "\nrename: Rename a project selected by its complete project number (PNR).\n";
+    if (action == "rename") return usage() + "\nrename: Rename a project selected by its complete project number (PNR).\n"
+        "Default: update only project links. --all-occurrences also replaces visible plain text and other link captions.\n";
     if (action == "delete") return usage() + "\ndelete: Delete a project selected by its complete PNR.\n"
                                          "Interactive confirmation is required unless -y / --yes is given.\n"
                                          "-r / --recursive also deletes child nodes; without it, child nodes prevent deletion.\n"
@@ -147,14 +148,23 @@ inline Result parse(int argc, char* argv[], std::ostream& out, std::ostream& err
     int years{1};
     bool all{false};
     bool yes{false}, recursive{false};
+    bool all_occurrences{false};
     if (action == "create") {
         if (pos + 1 != argc) { error("create requires exactly one project name"); return result; }
         name = argv[pos];
     }
     else if (action == "rename") {
-        if (pos + 2 != argc) { error("rename requires PNR and new project name"); return result; }
-        pnr = argv[pos];
-        name = argv[pos+1];
+        if (pos + 2 > argc or pos + 3 < argc) {
+            error("rename requires PNR, name and optional --all-occurrences"); return result;
+        }
+        pnr = argv[pos++];
+        name = argv[pos++];
+        if (pos < argc) {
+            if (std::string{argv[pos]} != "--all-occurrences") {
+                error(std::string{"unknown rename option: "} + argv[pos]); return result;
+            }
+            all_occurrences = true;
+        }
     }
     else if (action == "delete") {
         if (pos >= argc) { error("delete requires a project number (PNR)"); return result; }
@@ -203,6 +213,7 @@ inline Result parse(int argc, char* argv[], std::ostream& out, std::ostream& err
     result.argv.push_back("--local-project-action=" + action);
     if (yes) result.argv.push_back("--local-project-yes");
     if (recursive) result.argv.push_back("--local-project-recursive");
+    if (all_occurrences) result.argv.push_back("--local-project-all-occurrences");
     if (not name.empty()) result.argv.push_back("--local-project-name=" + name);
     if (not pnr.empty()) result.argv.push_back("--local-project-pnr=" + pnr);
     if (action == "list") {

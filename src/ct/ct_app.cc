@@ -351,6 +351,7 @@ int CtApp::on_command_line(const Glib::RefPtr<Gio::ApplicationCommandLine>& comm
         options->lookup_value("local-project-pnr", pnr);
         options->lookup_value("local-project-years", year_text);
         const bool all = options->contains("local-project-all");
+        const bool all_occurrences = options->contains("local-project-all-occurrences");
         const bool confirmed = options->contains("local-project-yes");
         const bool recursive = options->contains("local-project-recursive");
         int years{1};
@@ -439,7 +440,7 @@ int CtApp::on_command_line(const Glib::RefPtr<Gio::ApplicationCommandLine>& comm
             bool ok{false};
             if (action == "list") ok = win->get_ct_actions()->project_cli_list(years, all, output, error);
             else if (action == "create") ok = win->get_ct_actions()->project_cli_create(title, new_id, error);
-            else if (action == "rename") ok = win->get_ct_actions()->project_cli_rename(pnr, title, error);
+            else if (action == "rename") ok = win->get_ct_actions()->project_cli_rename(pnr, title, all_occurrences, error);
             else {
                 Glib::ustring display_name;
                 // Validate the project and all constraints BEFORE prompting.
@@ -1012,6 +1013,7 @@ void CtApp::_add_main_option_entries()
     add_main_option_entry(Gio::Application::OptionType::STRING,   "local-project-pnr",    0, "Local project number");
     add_main_option_entry(Gio::Application::OptionType::STRING,   "local-project-years",  0, "Local project year count");
     add_main_option_entry(Gio::Application::OptionType::BOOL,     "local-project-all",    0, "All local projects");
+    add_main_option_entry(Gio::Application::OptionType::BOOL,     "local-project-all-occurrences", 0, "Replace all project name text occurrences");
     add_main_option_entry(Gio::Application::OptionType::BOOL,     "local-project-yes",    0, "Skip local project deletion confirmation");
     add_main_option_entry(Gio::Application::OptionType::BOOL,     "local-project-recursive", 0, "Delete child nodes too");
     add_main_option_entry(Gio::Application::OptionType::STRING,   "node",               'n', _("Node name to focus"));
@@ -1034,6 +1036,7 @@ void CtApp::_add_main_option_entries()
     add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "local-project-pnr",    0, "Local project number");
     add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "local-project-years",  0, "Local project year count");
     add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "local-project-all",    0, "All local projects");
+    add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "local-project-all-occurrences", 0, "Replace all project name text occurrences");
     add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "local-project-yes",    0, "Skip local project deletion confirmation");
     add_main_option_entry(Gio::Application::OPTION_TYPE_BOOL,     "local-project-recursive", 0, "Delete child nodes too");
     add_main_option_entry(Gio::Application::OPTION_TYPE_STRING,   "node",               'n', _("Node name to focus"));

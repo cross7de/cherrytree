@@ -10,6 +10,7 @@
 #include <sstream>
 #include <iomanip>
 #include <vector>
+#include <utility>
 #include <functional>
 #include <algorithm>
 
@@ -185,6 +186,64 @@ void replace_span(const Glib::RefPtr<Gtk::TextBuffer>& buffer,
     auto at = buffer->get_iter_at_offset(start);
     buffer->insert_with_tags_by_name(at, replacement, tags);
 }
+
+// Collect full project name occurrences, either in matching internal links or
+// in all visible node text when explicitly requested. Positions are in the
+// original buffer; embedded objects are included in the offset calculation.
+// False signals an unsafe offset mapping and aborts rename before any edit.
+bool find_matching_links(const Glib::RefPtr<Gtk::TextBuffer>& buffer,
+                         const gint64 node_id, const Glib::ustring& old_name,
+                         const bool all_occurrences,
+                         std::vector<std::pair<int, int>>& matches)
+{
+    const auto text = buffer->get_slice(buffer->begin(), buffer->end());
+    const int count = buffer->get_char_count();
+    if (count != static_cast<int>(text.size())) return false;
+    const std::string tag = std::string{CtConst::TAG_LINK_PREFIX.c_str()} +
+                            "node " + std::to_string(node_id);
+    // Search for the old name first, then verify the link attribute at
+    // every character. Prefixes, suffixes and repeated names are supported.
+    for (Glib::ustring::size_type pos = text.find(old_name);
+         pos != Glib::ustring::npos;
+         pos = text.find(old_name, pos + old_name.size())) {
+        bool fully_linked = all_occurrences;
+        if (not all_occurrences) {
+            fully_linked = true;
+            for (auto i = pos; i < pos + old_name.size(); ++i) {
+                if (not has_link(buffer, static_cast<int>(i), tag)) {
+                    fully_linked = false;
+                    break;
+                }
+            }
+        }
+        else {
+            // Preserve link targets: a replacement may not cross boundaries
+            // between different links or linked and ordinary text.
+            auto link_at = [&](const int offset) -> std::string {
+                for (const auto& attr : buffer->get_iter_at_offset(offset).get_tags()) {
+                    const std::string name = attr->property_name().get_value().raw();
+                    const std::string prefix = CtConst::TAG_LINK_PREFIX.raw();
+                    if (name.compare(0, prefix.size(), prefix) == 0) return name;
+                }
+                return {};
+            };
+            const auto first_link = link_at(static_cast<int>(pos));
+            for (auto i = pos + 1; i < pos + old_name.size(); ++i) {
+                if (link_at(static_cast<int>(i)) != first_link) return false;
+            }
+        }
+        if (fully_linked) {
+            matches.emplace_back(static_cast<int>(pos),
+                                 static_cast<int>(pos + old_name.size()));
+        }
+    }
+    return true;
+}
+
+struct LinkedCaptionUpdates {
+    CtTreeIter node;
+    std::vector<std::pair<int, int>> spans;
+};
 
 bool validate_headline(const Glib::RefPtr<Gtk::TextBuffer>& buffer, const Glib::ustring& expected)
 {
@@ -366,7 +425,7 @@ bool CtActions::project_cli_create(const Glib::ustring& title,
 }
 
 bool CtActions::project_cli_rename(const Glib::ustring& pnr, const Glib::ustring& new_title,
-                                   Glib::ustring& error)
+                                   const bool all_occurrences, Glib::ustring& error)
 {
     if (not valid_title(new_title)) { error = "Invalid new project name"; return false; }
     CtTreeStore& store = _pCtMainWin->get_tree_store();
@@ -408,11 +467,68 @@ bool CtActions::project_cli_rename(const Glib::ustring& pnr, const Glib::ustring
     if (not validate_reference(overview_buffer, chosen.node.get_node_id(), old_name,
                                "", start, end, error)) return false;
 
+    // Validate all relevant text buffers before changing anything.
+    std::vector<LinkedCaptionUpdates> updates;
+    std::function<bool(CtTreeIter)> scan = [&](CtTreeIter node) -> bool {
+        while (node) {
+            if (node.get_node_id() != overview.get_node_id() and
+                (all_occurrences or node.get_node_syntax_highlighting() == CtConst::RICH_TEXT_ID)) {
+                std::vector<std::pair<int, int>> spans;
+                if (not find_matching_links(node.get_node_text_buffer(),
+                                            chosen.node.get_node_id(), old_name,
+                                            all_occurrences, spans)) {
+                    error = Glib::ustring{std::string{"Cannot safely replace project name in node "} + std::to_string(node.get_node_id())};
+                    return false;
+                }
+                if (all_occurrences and node.get_node_id() == chosen.node.get_node_id()) {
+                    // The validated project headline is replaced separately below.
+                    spans.erase(std::remove(spans.begin(), spans.end(),
+                                std::make_pair(2, 2 + static_cast<int>(old_name.size()))),
+                                spans.end());
+                }
+                if (not spans.empty()) {
+                    if (node.get_node_read_only()) {
+                        error = "A node containing matching project text is read-only";
+                        return false;
+                    }
+                    updates.push_back({node, std::move(spans)});
+                }
+            }
+            if (not scan(node.first_child())) return false;
+            ++node;
+        }
+        return true;
+    };
+    if (not scan(store.get_ct_iter_first())) return false;
+    std::vector<std::pair<int, int>> overview_spans;
+    if (not find_matching_links(overview_buffer, chosen.node.get_node_id(), old_name,
+                                all_occurrences, overview_spans)) {
+        error = "Cannot safely replace project name in project register";
+        return false;
+    }
+    if (std::find(overview_spans.begin(), overview_spans.end(),
+                  std::make_pair(start, end)) == overview_spans.end()) {
+        error = "Project register link was not selected for rename";
+        return false;
+    }
+
+    // Replace from right to left, to preserve offsets in each buffer.
+    for (const auto& update : updates) {
+        auto buffer = update.node.get_node_text_buffer();
+        for (auto it = update.spans.rbegin(); it != update.spans.rend(); ++it)
+            replace_span(buffer, it->first, it->second - it->first, new_name);
+        CtTreeIter node = update.node;
+        _pCtMainWin->update_window_save_needed(CtSaveNeededUpdType::nbuf, true, &node);
+    }
     replace_span(project_buffer, 2, static_cast<int>(old_name.size()), new_name);
     _pCtMainWin->update_window_save_needed(CtSaveNeededUpdType::nbuf, true, &chosen.node);
     chosen.node.set_node_name(new_name);
     _pCtMainWin->update_window_save_needed(CtSaveNeededUpdType::npro, false, &chosen.node);
-    replace_span(overview_buffer, start, end-start, new_name);
+
+    // The required register entry and other matching occurrences share
+    // precomputed offsets; process each occurrence once, right to left.
+    for (auto it = overview_spans.rbegin(); it != overview_spans.rend(); ++it)
+        replace_span(overview_buffer, it->first, it->second - it->first, new_name);
     _pCtMainWin->update_window_save_needed(CtSaveNeededUpdType::nbuf, true, &overview);
     return true;
 }
